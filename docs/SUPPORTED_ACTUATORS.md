@@ -11,7 +11,7 @@ validation limits; the feature summaries below depend on the selected controller
 | [Linak](beds/linak.md) | Auto-detected models, up to 5 axes, 0/4 memories, speed/status/errors, massage, alarms, lights |
 | [Keeson](beds/keeson.md) | Position feedback (Ergomotion), presets, massage, lights; [Adjustable Lite](beds/keeson.md#adjustable-lite-profile), [Simon Li / Heal Every Night / OKIN-Seating](beds/keeson.md#simon-li-heal-every-night-and-okin-seating-profiles), [INNOVA](beds/keeson.md#innova-profile), [MaxCoil / Dynasty / Bedsense](beds/ore-comfort-bed.md), [Restonic BT](beds/keeson.md#restonic-bt-profiles) |
 | [Richmat](beds/richmat.md) | Model-dependent motors, memory, massage, lighting, alarms and reported state; [RMControl](beds/rmcontrol.md), [Revive Control / Best Mattress / Blvd Home / HARMONY / Idealbed](beds/richmat-mh.md) |
-| [MotoSleep](beds/motosleep.md) | Model-dependent HHC/MOTO controls, memory, massage and lighting |
+| [MotoSleep](beds/motosleep.md) | Model-dependent HHC/MOTO controls, memory, massage and lighting; [Intellibed Sleep Genius](beds/motosleep.md#intellibed-sleep-genius) presets, RGB light and massage levels |
 | [OCTO Smart Control](beds/octo.md) | Standard OCTO capability-advertised motor, memory, light and setting controls; separate Star2 variant. Hardware validation is deferred |
 | [Solace](beds/solace.md) | Name-based profiles, named presets, optional massage/lights, exact S4-Y lift/tilt; explicit [Woosa Sleep](beds/woosa.md) profile with one Favourite memory |
 | [Leggett & Platt](beds/leggett-platt.md) | Gen2 motor control and RGB lighting; Okin tilt/lumbar and massage; [Prodigy / U Series](beds/leggett-okin.md) layouts and timers, [L&P legacy](beds/lp-legacy.md) model settings |
@@ -137,7 +137,7 @@ These beds have their own dedicated integrations:
 
 3. **Look at the device name** (shown during manual setup or in diagnostics):
    - A name beginning with accepted `QMS-IQ`, `QMS-I06`, `QMS-LQ`, `QMS-L04`, `QMS-JQ-D`, `QMS4`, `QMS-NQ`, `QMS3`, `QMS-MQ`, `QMS2`, `My QMS2`, `SealyMF`, or exact `S4-Y-<digits>-<id>` → Solace/QMS 11-byte family
-   - `HHC*` → MotoSleep
+   - `HHC*` → MotoSleep (13-character `HHC#####BEDM#` → Intellibed Sleep Genius)
    - `DPG*` or `Desk*` → Linak
    - `Mouselet*` → Kaidi
    - `Nectar*` → Nectar

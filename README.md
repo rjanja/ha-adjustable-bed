@@ -97,7 +97,7 @@ only know your bed's retail brand, check the [Supported Actuators guide](docs/SU
 | 🧪 [GM Control app](docs/beds/gmmotor.md) | Exact product catalogs, FWRM/WFRM desks, separate MM/SXB sleep modules; hardware unverified |
 | ❓ [Avocado Eco Base / CoasterSleep / Forty Winks / Milemont / Superior](docs/beds/richmat-classic-apps.md) | Explicit app and four-character layout; separate package-local catalogs, direct BLE controls and settings; hardware unverified |
 | ✅ [Richmat](docs/beds/richmat.md) | Casper, MLILY, Sven & Son, Avocado, Luuna, Jerome's; [RMControl](docs/beds/rmcontrol.md), [Revive Control / Best Mattress / Blvd Home / HARMONY / Idealbed](docs/beds/richmat-mh.md); ❓ [RUF Motor 2 / W.Silver Products / AMERICANSTAR (Richmat) / Bailey's Bed Control / TX and separate sleep receiver](docs/beds/ruf-richmat-apps.md) |
-| ✅ [MotoSleep](docs/beds/motosleep.md) | HHC, Power Bob, binary MOTO models |
+| ✅ [MotoSleep](docs/beds/motosleep.md) | HHC, Power Bob, binary MOTO models, Intellibed Sleep Genius |
 | ✅ [OCTO Smart Control](docs/beds/octo.md) | OCTO Smart Control; Star2 is a separate variant |
 | ✅ [Solace](docs/beds/solace.md) | Solace, Sealy, QMS, [Woosa Sleep](docs/beds/woosa.md) |
 | ✅ [Leggett & Platt](docs/beds/leggett-platt.md) | Prodigy LBR (LP Comfort Connect), Prodigy Comfort Elite / CE; [Prodigy 2L / 2 / 4 and U / Ultra Series](docs/beds/leggett-okin.md), [L&P Adjustable Base](docs/beds/lp-legacy.md) |

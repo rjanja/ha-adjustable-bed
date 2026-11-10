@@ -73,9 +73,7 @@ async def test_issue_468_short_panel_eight_keeps_home_preset() -> None:
 
     await controller.preset_flat()
 
-    client.write_gatt_char.assert_awaited_once_with(
-        MOTOSLEEP_CHAR_UUID, b"$O", response=False
-    )
+    client.write_gatt_char.assert_awaited_once_with(MOTOSLEEP_CHAR_UUID, b"$O", response=False)
 
 
 async def test_issue_470_short_panel_eight_keeps_toggle_only_light() -> None:
@@ -92,9 +90,7 @@ async def test_issue_470_short_panel_eight_keeps_toggle_only_light() -> None:
 
     await controller.lights_toggle()
 
-    client.write_gatt_char.assert_awaited_once_with(
-        MOTOSLEEP_CHAR_UUID, b"$A", response=False
-    )
+    client.write_gatt_char.assert_awaited_once_with(MOTOSLEEP_CHAR_UUID, b"$A", response=False)
 
 
 def test_power_bob_accepts_exact_length_name_containing_hhc() -> None:
@@ -607,3 +603,209 @@ def test_swing_is_only_exposed_by_swing_models() -> None:
     assert swing.profile.swing == 0x8014
     assert wr219.profile.swing == 0x9089
     assert normal.supports_preset_swing is False
+
+
+# Intellibed Sleep Genius (com.mobile.intellibed 2.1.67).  Byte vectors are the
+# literals and XOR checksums of the app's own frame builders.
+_INTELLIBED_NAME = "HHC14951BEDM9"
+
+
+@pytest.mark.parametrize("name", ["HHC14951BEDM9", "HHC23235BEDM9", "hhc14951bedm9"])
+def test_intellibed_names_route_to_their_own_profile(name: str) -> None:
+    """Both halves' 13-character names select the Intellibed command table."""
+    profile = resolve_motosleep_profile(name)
+
+    assert profile.profile_id == "intellibed_sleep_genius"
+    assert profile.transport is MotoSleepTransport.MOTO_BINARY
+    assert profile.write_with_response is True
+
+
+@pytest.mark.parametrize("name", ["HHC14951BEDM", "HHC1495XBEDM9", "HHC14951BEDX9"])
+def test_near_intellibed_names_keep_previous_routing(name: str) -> None:
+    """Only the exact Intellibed pattern changes routing."""
+    assert resolve_motosleep_profile(name).profile_id != "intellibed_sleep_genius"
+
+
+@pytest.mark.parametrize(
+    ("command", "data", "expected"),
+    [
+        (0x0002, 0, "242300020000024 10d"),
+        (0x0001, 0, "242300010000014 10d"),
+        (0x0008, 0, "242300080000084 10d"),
+        (0x0004, 0, "242300040000044 10d"),
+        (0x5555, 0, "242355550000004 10d"),
+        (0x8009, 0, "242380090000894 10d"),
+        (0x800A, 0, "2423800a00008a4 10d"),
+        (0x800B, 0, "2423800b00008b4 10d"),
+        (0x800C, 0, "2423800c00008c4 10d"),
+        (0x80F1, 0, "242380f10000714 10d"),
+        (0x80F2, 0, "242380f20000724 10d"),
+        (0x8279, 40, "242382790028d34 10d"),
+        (0x8279, 80, "242382790050ab4 10d"),
+        (0x8279, 120, "24238279007883 410d"),
+        (0x827A, 0, "2423827a0000f84 10d"),
+        (0x8100, 0, "242381000000814 10d"),
+        (0x80E9, 82, "242380e900523b4 10d"),
+        (0x80EA, 119, "242380ea00771d4 10d"),
+    ],
+)
+def test_intellibed_frames_match_app_vectors(command: int, data: int, expected: str) -> None:
+    """The shared binary builder reproduces the app's literal frames."""
+    assert build_moto_binary_frame(command, data) == bytes.fromhex(expected.replace(" ", ""))
+
+
+def test_intellibed_capabilities() -> None:
+    """Intellibed exposes its app's controls and no MotoSleep extras."""
+    controller, _ = _controller(_INTELLIBED_NAME)
+
+    assert set(controller.profile.motors) == {"back", "legs"}
+    assert controller.supports_preset_flat
+    assert controller.supports_preset_zero_g
+    assert controller.supports_preset_anti_snore
+    assert controller.supports_preset_tv
+    assert controller.supports_preset_lounge
+    assert not controller.supports_memory_presets
+    assert not controller.supports_memory_programming
+    assert not controller.supports_preset_swing
+    assert controller.supports_lights
+    assert controller.supports_discrete_light_control
+    assert controller.supports_explicit_light_on_control
+    assert controller.supports_light_color_control
+    assert not controller.supports_light_toggle_control
+    assert controller.light_state_is_assumed
+    assert controller.supports_massage
+    assert controller.supports_massage_off_control
+    assert controller.supports_massage_intensity_control
+    assert controller.massage_intensity_zones == ["head", "foot"]
+    assert controller.massage_intensity_max == 3
+    assert controller.supports_stop_all
+
+
+async def test_intellibed_head_move_repeats_then_releases() -> None:
+    """Held head-up refreshes 0x0002 and ends with five 0x0000 releases."""
+    controller, client = _controller(_INTELLIBED_NAME)
+
+    await controller.move_head_up()
+
+    calls = client.write_gatt_char.await_args_list
+    assert calls[0].args[1] == build_moto_binary_frame(0x0002)
+    assert [c.args[1] for c in calls[1:]] == [build_moto_binary_frame(0x0000)] * 5
+    assert all(c.kwargs["response"] is True for c in calls)
+
+
+async def test_intellibed_feet_down_uses_standard_leg_code() -> None:
+    controller, client = _controller(_INTELLIBED_NAME)
+
+    await controller.move_feet_down()
+
+    assert client.write_gatt_char.await_args_list[0].args[1] == build_moto_binary_frame(0x0004)
+
+
+async def test_intellibed_presets_are_held_then_released() -> None:
+    """A single preset frame moves nothing; presets send 20 frames first."""
+    controller, client = _controller(_INTELLIBED_NAME)
+
+    with patch.object(controller, "_write_gatt_with_retry", AsyncMock()) as write:
+        await controller.preset_zero_g()
+
+    first, release = write.await_args_list
+    assert first.args[1] == build_moto_binary_frame(0x800B)
+    assert first.kwargs["repeat_count"] == 20
+    assert first.kwargs["repeat_delay_ms"] == 100
+    assert release.args[1] == build_moto_binary_frame(0x0000)
+    assert release.kwargs["repeat_count"] == 5
+
+
+async def test_intellibed_flat_and_lounge_use_app_codes() -> None:
+    controller, _ = _controller(_INTELLIBED_NAME)
+
+    with patch.object(controller, "_write_gatt_with_retry", AsyncMock()) as write:
+        await controller.preset_flat()
+        await controller.preset_lounge()
+
+    frames = [c.args[1] for c in write.await_args_list]
+    assert frames == [
+        build_moto_binary_frame(0x5555),
+        build_moto_binary_frame(0x0000),
+        build_moto_binary_frame(0x800C),
+        build_moto_binary_frame(0x0000),
+    ]
+
+
+async def test_intellibed_light_on_off_are_explicit_single_frames() -> None:
+    """Hardware-confirmed on/off frames, never a toggle."""
+    controller, client = _controller(_INTELLIBED_NAME)
+
+    await controller.lights_on()
+    await controller.lights_off()
+
+    assert [c.args[1] for c in client.write_gatt_char.await_args_list] == [
+        bytes.fromhex("242380f1000071410d"),
+        bytes.fromhex("242380f2000072410d"),
+    ]
+
+
+async def test_intellibed_white_sends_no_channel_frames() -> None:
+    """The app's white is the on frame alone; channels at 120 are never sent."""
+    controller, client = _controller(_INTELLIBED_NAME)
+
+    with patch("custom_components.adjustable_bed.beds.motosleep.asyncio.sleep"):
+        await controller.set_light_color((255, 255, 255))
+
+    client.write_gatt_char.assert_not_awaited()
+
+
+async def test_intellibed_colour_writes_three_channel_frames() -> None:
+    """The app's blue (2, 82, 119) in red, green, blue channel order."""
+    controller, client = _controller(_INTELLIBED_NAME)
+    rgb = tuple(round(v * 255 / 120) for v in (2, 82, 119))
+
+    with patch("custom_components.adjustable_bed.beds.motosleep.asyncio.sleep"):
+        await controller.set_light_color(rgb)
+
+    assert [c.args[1] for c in client.write_gatt_char.await_args_list] == [
+        bytes.fromhex("242380e800026a410d"),
+        bytes.fromhex("242380e900523b410d"),
+        bytes.fromhex("242380ea00771d410d"),
+    ]
+
+
+async def test_intellibed_black_turns_the_light_off() -> None:
+    controller, client = _controller(_INTELLIBED_NAME)
+
+    await controller.set_light_color((0, 0, 0))
+
+    client.write_gatt_char.assert_awaited_once_with(
+        MOTOSLEEP_CHAR_UUID, bytes.fromhex("242380f2000072410d"), response=True
+    )
+
+
+async def test_intellibed_massage_levels_and_stop_all() -> None:
+    controller, client = _controller(_INTELLIBED_NAME)
+
+    await controller.set_massage_intensity("head", 1)
+    await controller.set_massage_intensity("foot", 3)
+    assert controller.get_massage_state() == {"head_intensity": 1, "foot_intensity": 3}
+    await controller.massage_off()
+
+    assert [c.args[1] for c in client.write_gatt_char.await_args_list] == [
+        bytes.fromhex("242382790028d3410d"),
+        bytes.fromhex("2423827a007880410d"),
+        bytes.fromhex("2423810000008141 0d".replace(" ", "")),
+    ]
+    assert controller.get_massage_state() == {"head_intensity": 0, "foot_intensity": 0}
+    with pytest.raises(ValueError):
+        await controller.set_massage_intensity("head", 4)
+
+
+async def test_intellibed_massage_steps_use_app_codes() -> None:
+    controller, client = _controller(_INTELLIBED_NAME)
+
+    await controller.massage_head_up()
+    await controller.massage_head_down()
+    await controller.massage_foot_up()
+    await controller.massage_foot_down()
+
+    assert [c.args[1] for c in client.write_gatt_char.await_args_list] == [
+        build_moto_binary_frame(command) for command in (0x8102, 0x8104, 0x8103, 0x8105)
+    ]

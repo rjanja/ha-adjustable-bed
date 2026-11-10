@@ -22,6 +22,8 @@ features, and STOP behavior.
 - Power Bob
 - Device names containing "HHC" (e.g., `HHC3611243CDEF`, `HHC0069815CDEF`)
 - Binary MOTO beds with exact 28-character `MOTOB...` or `MOTOS...` names
+- Intellibed Sleep Genius Smart Base, 13-character `HHC#####BEDM#` names
+  (e.g. `HHC14951BEDM9`), see [Intellibed Sleep Genius](#intellibed-sleep-genius)
 - Dedicated model pages: WR1140, the WRS14 series (WRS14Dmm, WRS14ms), WRS16ms,
   WRS18ms, WRS20ms, WRS20ms Swing, WRS23ms, WRS27ms, WRC30Mms and WR219
 
@@ -30,6 +32,7 @@ features, and STOP behavior.
 | Analyzed | App | Package ID |
 |----------|-----|------------|
 | ✅ | [MotoSleep](https://play.google.com/store/apps/details?id=com.HHC.MotoSleep) 5.1.5 (`2026071001`) | `com.HHC.MotoSleep` |
+| ✅ | Intellibed Sleep Genius 2.1.67 (`67`) | `com.mobile.intellibed` |
 | ✅ | [Power Bob for Adjustable Bed](https://play.google.com/store/apps/details?id=com.HHC.PowerBob) 2.0.3 (`2025061101`) | `com.HHC.PowerBob` |
 
 See [Analysis provenance](#analysis-provenance) for artifact hashes.
@@ -140,6 +143,9 @@ at index 8 and `5` at index 9, which selects the Power Bob A15 panel.
   controls. Legacy manual configurations without a usable advertised name keep
   a conservative two-axis fallback (back `$K`/`$L`, legs `$M`/`$N`, STOP);
   current long HHC names retain the app's PanelOne default route.
+- Intellibed Sleep Genius names match `^HHC\d{5}BEDM\d$` (13 characters) and
+  select their own binary profile. Before this, they fell through to the
+  conservative ASCII fallback, which this base does not understand.
 - AUDIO and MotoAMP names are intentionally not bed controllers.
 
 ### Power Bob profiles (14-character names)
@@ -303,6 +309,54 @@ Common fixed commands include:
 | Normal release | `0x0000` / data `0x0000` |
 | WR219 release | `0x9088` / data `0x0001` |
 
+### Intellibed Sleep Genius
+
+The Intellibed Sleep Genius app writes the nine-byte MOTO binary frame raw to
+FFE1 with a response, and enables FFE1 notifications. It sends nothing else on
+connect (no handshake or keep-alive) and does not pair. Its command table
+differs from the MotoSleep binary pages:
+
+| Function | Command / data | Frame |
+|----------|----------------|-------|
+| Head up / down | `0x0002` / `0x0001` | `24 23 00 02 00 00 02 41 0d` / `24 23 00 01 00 00 01 41 0d` |
+| Feet up / down | `0x0008` / `0x0004` | `24 23 00 08 00 00 08 41 0d` / `24 23 00 04 00 00 04 41 0d` |
+| Flat | `0x5555` | `24 23 55 55 00 00 00 41 0d` |
+| Anti-snore, TV, zero-G | `0x8009`, `0x800A`, `0x800B` | `24 23 80 09 00 00 89 41 0d`, ... |
+| Lounge | `0x800C` | `24 23 80 0c 00 00 8c 41 0d` |
+| Light on / off | `0x80F1` / `0x80F2` | `24 23 80 f1 00 00 71 41 0d` / `24 23 80 f2 00 00 72 41 0d` |
+| Light red, green, blue channel | `0x80E8`, `0x80E9`, `0x80EA`, data 0..120 | e.g. green 64: `24 23 80 e9 00 40 29 41 0d` |
+| Head massage off/low/medium/high | `0x8279`, data 0 / 40 / 80 / 120 | `24 23 82 79 00 28 d3 41 0d` (low) |
+| Foot massage off/low/medium/high | `0x827A`, data 0 / 40 / 80 / 120 | `24 23 82 7a 00 28 d0 41 0d` (low) |
+| Massage stop all | `0x8100` | `24 23 81 00 00 00 81 41 0d` |
+| Head massage + / - | `0x8102` / `0x8104` | |
+| Foot massage + / - | `0x8103` / `0x8105` | |
+| Release | `0x0000` | `24 23 00 00 00 00 00 41 0d` |
+
+Home Assistant exposes head (back) and feet (legs) covers, Flat, Anti-snore,
+TV, Zero-G and Lounge buttons, an RGB under-bed light, head and foot massage
+level sliders (0-3), massage steps and massage off.
+
+- The light is explicit on/off, never a toggle. The app's white is the on frame
+  alone, so white sends no channel frames; other colours send the on frame
+  then the three channel frames 100 ms apart. The app never reads the light
+  back, so Home Assistant reports an assumed state.
+- The app's own colours: blue (2, 82, 119), green (0, 64, 0), cyan (2, 120, 50),
+  purple (80, 2, 119), as channel values.
+- Do not send codes from the other MotoSleep tables to this base. Unknown
+  commands are not ignored: `0x0106` and `0x013B`-`0x013D` moved a motor on
+  hardware. Memory recall/save, `0x800D`, `0x800E` and the numeric RGB frames
+  are absent from the app and are not exposed.
+- Not exposed: the app's massage timer buttons (`0x827B`-`0x827D`). The app
+  counts the time itself and sends the off frames when it ends.
+- Status: notifications on FFE1 carry about five `$`-prefixed text frames a
+  second (36 five-digit fields: field 1 running command, 2/3 head/feet position
+  counts, 6/7 head/foot massage level, 8-10 light RGB 0..120). Home Assistant
+  does not parse them yet.
+
+Hardware status (one base, `HHC14951BEDM9`): head and feet movement, zero-G,
+light on/off and the release frame are confirmed. Flat `0x5555`, Lounge,
+colours and massage come from the app and are not yet confirmed on hardware.
+
 ## Command Timing
 
 ### HHC timing
@@ -328,6 +382,17 @@ Common fixed commands include:
 
 Normal MOTO movement release sends command/data `0x0000/0x0000` five times at
 100 ms intervals. WR219 sends `0x9088/0x0001` six times at 100 ms intervals.
+
+### Intellibed timing
+
+- Held head/feet buttons repeat the frame every 100 ms. The app sends nothing
+  on release and the bed prints `STOP!` and stops by itself about 0.9 s after
+  the last frame. Home Assistant sends the `0x0000` release five times at
+  100 ms, which the hardware accepts without motion, to stop promptly.
+- One preset frame moves nothing on hardware. Presets repeat their frame 20
+  times (or the motor pulse count if larger) at 100 ms, then release.
+- Light, colour and massage frames are single writes. The app sends a colour's
+  channel frames 100 ms apart.
 
 ## Notes
 

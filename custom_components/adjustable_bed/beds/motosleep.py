@@ -98,6 +98,7 @@ class MotoSleepController(BedController):
         self._device_name = device_name or getattr(coordinator, "ble_device_name", None)
         self.profile: MotoSleepProfile = resolve_motosleep_profile(self._device_name)
         self._light_rgb = (255, 255, 255)
+        self._massage_levels: dict[str, int] = {}
         _LOGGER.info(
             "MotoSleep local name %r resolved to profile %s",
             self._device_name,
@@ -141,6 +142,10 @@ class MotoSleepController(BedController):
         return "tv" in self.profile.presets
 
     @property
+    def supports_preset_lounge(self) -> bool:
+        return "lounge" in self.profile.presets
+
+    @property
     def supports_preset_swing(self) -> bool:
         return self.profile.swing is not None
 
@@ -157,12 +162,20 @@ class MotoSleepController(BedController):
         return bool(self.profile.memory_save)
 
     @property
+    def _has_explicit_light(self) -> bool:
+        return self.profile.light_on is not None and self.profile.light_off is not None
+
+    @property
     def supports_lights(self) -> bool:
-        return self.profile.light_toggle is not None or self.profile.rgb_light
+        return (
+            self.profile.light_toggle is not None
+            or self.profile.rgb_light
+            or self._has_explicit_light
+        )
 
     @property
     def supports_light_color_control(self) -> bool:
-        return self.profile.rgb_light
+        return self.profile.rgb_light or self.profile.binary_rgb_channels is not None
 
     @property
     def supports_light_toggle_control(self) -> bool:
@@ -170,28 +183,45 @@ class MotoSleepController(BedController):
 
     @property
     def supported_color_mode(self) -> str | None:
-        return "rgb" if self.profile.rgb_light else None
+        return "rgb" if self.supports_light_color_control else None
 
     @property
     def default_light_rgb_color(self) -> tuple[int, int, int] | None:
-        return (255, 255, 255) if self.profile.rgb_light else None
+        return (255, 255, 255) if self.supports_light_color_control else None
 
     @property
     def supports_discrete_light_control(self) -> bool:
         # RGB channels are absolute: a non-zero colour turns the LEDs on and
         # three zero channels turn them off.  Treat that as discrete power so
         # Home Assistant does not try the unrelated $A toggle on RGB profiles.
-        return self.profile.rgb_light
+        return self.profile.rgb_light or self._has_explicit_light
 
     @property
     def supports_explicit_light_on_control(self) -> bool:
-        # set_light_color() itself is the idempotent on operation.  Returning
-        # False avoids sending the three RGB channels twice on turn-on.
-        return False
+        # Numeric RGB: set_light_color() itself is the idempotent on operation.
+        # Returning False avoids sending the three RGB channels twice.  Binary
+        # explicit-light profiles send their on frame before any colour.
+        return self._has_explicit_light
+
+    @property
+    def light_state_is_assumed(self) -> bool:
+        return self._has_explicit_light
+
+    @property
+    def supports_massage_intensity_control(self) -> bool:
+        return bool(self.profile.massage_levels)
+
+    @property
+    def massage_intensity_zones(self) -> list[str]:
+        return list(self.profile.massage_levels)
+
+    @property
+    def massage_intensity_max(self) -> int:
+        return self.profile.massage_level_max or super().massage_intensity_max
 
     @property
     def supports_massage(self) -> bool:
-        return bool(self.profile.massage)
+        return bool(self.profile.massage) or bool(self.profile.massage_levels)
 
     @property
     def supports_synchro(self) -> bool:
@@ -204,7 +234,7 @@ class MotoSleepController(BedController):
     @property
     def auto_enable_massage(self) -> bool:
         """Expose app-proven massage controls without a legacy manual toggle."""
-        return bool(self.profile.massage)
+        return self.supports_massage
 
     @property
     def supports_massage_off_control(self) -> bool:
@@ -443,7 +473,20 @@ class MotoSleepController(BedController):
         action = self.profile.presets.get(key)
         if action is None:
             raise NotImplementedError(f"{key} preset is not present on {self.profile.profile_id}")
-        await self._send_action(action)
+        if self.profile.preset_repeat <= 1:
+            await self._send_action(action)
+            return
+        try:
+            await self._send_action(
+                action,
+                repeat_count=max(self.profile.preset_repeat, self._coordinator.motor_pulse_count),
+                repeat_delay_ms=100,
+            )
+        finally:
+            await self._send_stop()
+
+    async def preset_lounge(self) -> None:
+        await self._preset("lounge")
 
     async def preset_flat(self) -> None:
         await self._preset("flat")
@@ -485,12 +528,18 @@ class MotoSleepController(BedController):
         await self._send_action(self.profile.memory_save[memory_num - 1])
 
     async def lights_on(self) -> None:
+        if self.profile.light_on is not None:
+            await self._send_action(self.profile.light_on)
+            return
         if self.profile.rgb_light:
             await self.set_light_color(self._light_rgb)
             return
         await self.lights_toggle()
 
     async def lights_off(self) -> None:
+        if self.profile.light_off is not None:
+            await self._send_action(self.profile.light_off)
+            return
         if self.profile.rgb_light:
             await self.set_light_color((0, 0, 0))
             return
@@ -502,6 +551,10 @@ class MotoSleepController(BedController):
         await self._send_action(self.profile.light_toggle)
 
     async def set_light_color(self, rgb_color: tuple[int, int, int]) -> None:
+        channels = self.profile.binary_rgb_channels
+        if channels is not None:
+            await self._set_binary_light_color(channels, rgb_color)
+            return
         if not self.profile.rgb_light:
             raise NotImplementedError("RGB light is not present on this model")
         scaled = tuple(int(channel / 255 * 120) for channel in rgb_color)
@@ -519,8 +572,38 @@ class MotoSleepController(BedController):
         if any(rgb_color):
             self._light_rgb = rgb_color
 
+    async def _set_binary_light_color(
+        self, channels: tuple[int, int, int], rgb_color: tuple[int, int, int]
+    ) -> None:
+        """Write the app's three channel frames (0..120) after the on frame.
+
+        The app's white button sends only the light-on frame and no channel
+        values, so white is left to lights_on().  A black colour is light off.
+        """
+        if not any(rgb_color):
+            await self.lights_off()
+            return
+        if tuple(rgb_color) != (255, 255, 255):
+            scaled = tuple(round(channel / 255 * 120) for channel in rgb_color)
+            for command, value in zip(channels, scaled, strict=True):
+                await asyncio.sleep(0.1)
+                await self._send_action(command, data=value)
+        self._light_rgb = rgb_color
+
     def get_light_state(self) -> dict[str, object]:
         return {"rgb_color": self._light_rgb}
+
+    async def set_massage_intensity(self, zone: str, level: int) -> None:
+        command = self.profile.massage_levels.get(zone)
+        if command is None:
+            raise NotImplementedError(f"{zone} massage intensity is not present")
+        if not 0 <= level <= self.profile.massage_level_max:
+            raise ValueError(f"Massage level must be 0-{self.profile.massage_level_max}")
+        await self._send_action(command, data=level * self.profile.massage_level_step)
+        self._massage_levels[zone] = level
+
+    def get_massage_state(self) -> dict[str, object]:
+        return {f"{zone}_intensity": level for zone, level in self._massage_levels.items()}
 
     async def _massage(self, key: str) -> None:
         action = self.profile.massage.get(key)
@@ -530,6 +613,7 @@ class MotoSleepController(BedController):
 
     async def massage_off(self) -> None:
         await self._massage("off")
+        self._massage_levels = dict.fromkeys(self.profile.massage_levels, 0)
 
     async def massage_head_toggle(self) -> None:
         await self._massage("head_toggle")

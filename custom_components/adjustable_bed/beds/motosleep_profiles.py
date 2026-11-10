@@ -46,6 +46,17 @@ class MotoSleepProfile:
     swing: Command | None = None
     synchro: tuple[str, str] | None = None
     auxiliary_action: Command | None = None
+    # Explicit binary light power frames (Intellibed Sleep Genius).
+    light_on: Command | None = None
+    light_off: Command | None = None
+    # Binary per-channel RGB commands (red, green, blue); data is 0..120.
+    binary_rgb_channels: tuple[int, int, int] | None = None
+    # Binary absolute massage levels: zone -> command, data = level * step.
+    massage_levels: Mapping[str, int] = MappingProxyType({})
+    massage_level_step: int = 0
+    massage_level_max: int = 0
+    # Frames sent per preset press before the release schedule.
+    preset_repeat: int = 1
 
 
 def _frozen(mapping: Mapping[str, Command | MotorPair] | None = None) -> Mapping:
@@ -430,12 +441,63 @@ def _resolve_moto(name: str) -> MotoSleepProfile:
     )
 
 
+# Intellibed Sleep Genius bases advertise 13-character names such as
+# ``HHC14951BEDM9``.  Their app ("Intellibed Sleep Genius" 2.1.67,
+# ``com.mobile.intellibed``) writes raw binary MOTO frames to FFE1 with a
+# response and ships its own command table, which differs from the MotoSleep
+# binary pages (flat, light and massage codes).
+_INTELLIBED_RE = re.compile(r"^HHC\d{5}BEDM\d$")
+
+
+def _intellibed_profile() -> MotoSleepProfile:
+    """Return the Intellibed Sleep Genius command table from its own app."""
+    return MotoSleepProfile(
+        profile_id="intellibed_sleep_genius",
+        transport=MotoSleepTransport.MOTO_BINARY,
+        motors=_frozen({"back": (0x0002, 0x0001), "legs": (0x0008, 0x0004)}),
+        presets=_frozen(
+            {
+                "flat": 0x5555,
+                "anti_snore": 0x8009,
+                "tv": 0x800A,
+                "zero_g": 0x800B,
+                "lounge": 0x800C,
+            }
+        ),
+        light_on=0x80F1,
+        light_off=0x80F2,
+        binary_rgb_channels=(0x80E8, 0x80E9, 0x80EA),
+        massage=_frozen(
+            {
+                "off": 0x8100,
+                "head_up": 0x8102,
+                "head_down": 0x8104,
+                "foot_up": 0x8103,
+                "foot_down": 0x8105,
+            }
+        ),
+        massage_levels=_frozen({"head": 0x8279, "foot": 0x827A}),
+        massage_level_step=40,
+        massage_level_max=3,
+        # The app sends nothing on release and the bed stops by itself after
+        # about 0.9 s.  The standard 0x0000 release is accepted by the
+        # hardware without motion and stops it promptly.
+        stop=((0x0000, 0), 5, 100),
+        write_with_response=True,
+        # Hardware: a single zero-G/flat frame moves nothing; about 20 frames
+        # 100 ms apart start the preset.
+        preset_repeat=20,
+    )
+
+
 def resolve_motosleep_profile(device_name: str | None) -> MotoSleepProfile:
     """Resolve the exact OEM-app profile selected by an advertised local name."""
     name = device_name or ""
     upper_name = name.upper()
     if upper_name.startswith("MOTO"):
         return _resolve_moto(upper_name)
+    if _INTELLIBED_RE.match(upper_name):
+        return _intellibed_profile()
     if "HHC" in upper_name and len(name) == 14:
         return _resolve_power_bob(upper_name)
     if "HHC" in upper_name and len(name) >= 14:
