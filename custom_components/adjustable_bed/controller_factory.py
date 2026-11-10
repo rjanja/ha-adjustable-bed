@@ -44,6 +44,7 @@ from .const import (
     BED_TYPE_GMMOTOR_SLEEP_SXB,
     BED_TYPE_GOODVIBE,
     BED_TYPE_HJBED,
+    BED_TYPE_INTELLIBED,
     BED_TYPE_ISLEEP,
     BED_TYPE_JENSEN,
     BED_TYPE_JIECANG,
@@ -1596,6 +1597,15 @@ async def create_controller(
         from .beds.motosleep import MotoSleepController
 
         return MotoSleepController(coordinator, device_name=device_name)
+
+    if bed_type == BED_TYPE_INTELLIBED:
+        await coordinator.hass.async_add_import_executor_job(
+            import_module, ".beds.motosleep", __package__
+        )
+        from .beds.motosleep import MotoSleepController
+        from .beds.motosleep_profiles import intellibed_profile
+
+        return MotoSleepController(coordinator, device_name=device_name, profile=intellibed_profile())
 
     if bed_type == BED_TYPE_LEGGETT_PLATT:
         # Use configured variant or auto-detect

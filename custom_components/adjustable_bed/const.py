@@ -443,6 +443,9 @@ BED_TYPE_ESHINE: Final = "eshine"  # Explicit Eshine E6000 app profile
 BED_TYPE_RICHMAT: Final = "richmat"
 BED_TYPE_SOLACE: Final = "solace"
 BED_TYPE_MOTOSLEEP: Final = "motosleep"
+# Intellibed Sleep Genius: MotoSleep controller with the Intellibed app profile
+# and FFE1 status-frame position feedback.
+BED_TYPE_INTELLIBED: Final = "intellibed"
 
 BEDS_WITH_PASSIVE_POSITION_RECONCILIATION: Final = frozenset({BED_TYPE_LINAK})
 
@@ -716,6 +719,7 @@ SUPPORTED_BED_TYPES: Final = [
     BED_TYPE_RICHMAT,
     BED_TYPE_SOLACE,
     BED_TYPE_MOTOSLEEP,
+    BED_TYPE_INTELLIBED,
     BED_TYPE_REVERIE,
     BED_TYPE_KEESON,
     BED_TYPE_ERGOMOTION,
@@ -860,6 +864,7 @@ OFFLINE_CAPABILITY_SAFE_BED_TYPES: Final = frozenset(
         BED_TYPE_LEGGETT_WILINKE,
         BED_TYPE_SOLACE,
         BED_TYPE_MOTOSLEEP,
+        BED_TYPE_INTELLIBED,
         BED_TYPE_REVERIE,
         BED_TYPE_REVERIE_NIGHTSTAND,
         BED_TYPE_REVERIE_PAIRLINK,
@@ -3020,6 +3025,8 @@ BEDS_WITH_POSITION_FEEDBACK: Final = frozenset(
         BED_TYPE_BEDJET_POWERLAYER,
         # Head and foot angles come from the app's pulse lookup tables (#239).
         BED_TYPE_SBI,
+        # Head/feet position counts from the FFE1 status frames.
+        BED_TYPE_INTELLIBED,
     }
 )
 
@@ -3130,6 +3137,7 @@ BEDS_WITH_PERCENTAGE_POSITIONS: Final = frozenset(
         BED_TYPE_SLEEPSTAR,
         BED_TYPE_REVERIE_NIGHTSTAND,
         BED_TYPE_REVERIE_PAIRLINK,
+        BED_TYPE_INTELLIBED,
     }
 )
 

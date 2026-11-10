@@ -21,6 +21,7 @@ from .const import (
     BED_TYPE_GMMOTOR,
     BED_TYPE_GMMOTOR_SLEEP_MM,
     BED_TYPE_GMMOTOR_SLEEP_SXB,
+    BED_TYPE_INTELLIBED,
     BED_TYPE_JENSEN,
     BED_TYPE_JIECANG,
     BED_TYPE_JIECANG_APP,
@@ -456,6 +457,11 @@ ACTUATOR_GROUPS: Final[dict[str, ActuatorGroup]] = {
         "description": "HHC branded beds",
         "variants": None,  # Single protocol
     },
+    "intellibed": {
+        "display": "Intellibed Sleep Genius",
+        "description": "Sleep Genius Smart Base (HHC#####BEDM# names)",
+        "variants": None,  # Single protocol
+    },
     "octo": {
         "display": "Octo",
         "description": "Octo beds (may require PIN)",
@@ -672,6 +678,7 @@ SINGLE_TYPE_GROUPS: Final[dict[str, str]] = {
     "kaidi": BED_TYPE_KAIDI,
     "linak": BED_TYPE_LINAK,
     "motosleep": BED_TYPE_MOTOSLEEP,
+    "intellibed": BED_TYPE_INTELLIBED,
     "octo": BED_TYPE_OCTO,
     "richmat": BED_TYPE_RICHMAT,
     "solace": BED_TYPE_SOLACE,

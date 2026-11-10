@@ -144,8 +144,10 @@ at index 8 and `5` at index 9, which selects the Power Bob A15 panel.
   a conservative two-axis fallback (back `$K`/`$L`, legs `$M`/`$N`, STOP);
   current long HHC names retain the app's PanelOne default route.
 - Intellibed Sleep Genius names match `^HHC\d{5}BEDM\d$` (13 characters) and
-  select their own binary profile. Before this, they fell through to the
-  conservative ASCII fallback, which this base does not understand.
+  are detected as their own bed type, **Intellibed Sleep Genius**
+  (`intellibed`), which uses this controller with the Intellibed profile and
+  adds position feedback. A `motosleep` entry with such a name still selects
+  the Intellibed commands, without position feedback.
 - AUDIO and MotoAMP names are intentionally not bed controllers.
 
 ### Power Bob profiles (14-character names)
@@ -349,13 +351,27 @@ level sliders (0-3), massage steps and massage off.
 - Not exposed: the app's massage timer buttons (`0x827B`-`0x827D`). The app
   counts the time itself and sends the off frames when it ends.
 - Status: notifications on FFE1 carry about five `$`-prefixed text frames a
-  second (36 five-digit fields: field 1 running command, 2/3 head/feet position
-  counts, 6/7 head/foot massage level, 8-10 light RGB 0..120). Home Assistant
-  does not parse them yet.
+  second, 36 space-separated five-digit fields ending CR, mixed with text lines
+  such as `STOP!`, `RESET_RF!` and `NO_HL!`. Home Assistant reassembles the
+  lines and reads (zero-based) field 2/3 as head/feet position counts, 6/7 as
+  head/foot massage level (0/40/80/120) and 8-10 as the light's red, green and
+  blue (0..120). Field 1 is the running command and field 33 the bed number.
+
+#### Position feedback
+
+Head and feet positions are reported as 0-100% of full travel. Full travel is
+provisional: 1700 counts for the head and 450 for the feet (one base reached
+1655 and 232), and each axis's scale grows to the largest count seen, so
+raising an axis fully once calibrates it for that session. Raw counts, the
+largest seen and the scale in use appear in the device diagnostics
+(`protocol_diagnostics`). The light and massage entities follow the reported
+state.
 
 Hardware status (one base, `HHC14951BEDM9`): head and feet movement, zero-G,
 light on/off and the release frame are confirmed. Flat `0x5555`, Lounge,
 colours and massage come from the app and are not yet confirmed on hardware.
+The position counts and their full-travel scale are observed on that base, not
+measured end to end.
 
 ## Command Timing
 

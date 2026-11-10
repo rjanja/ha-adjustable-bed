@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 from bleak.exc import BleakError
 
+from .beds.motosleep_profiles import is_intellibed_name
 from .cluster018_discovery import matching_apps as cluster018_matching_apps
 from .cluster018_profiles import APP_NAMES as CLUSTER018_APPS
 from .const import (
@@ -48,6 +49,7 @@ from .const import (
     BED_TYPE_GLIDEAWAY_MOTION,
     BED_TYPE_GOODVIBE,
     BED_TYPE_HJBED,
+    BED_TYPE_INTELLIBED,
     BED_TYPE_ISLEEP,
     BED_TYPE_JENSEN,
     BED_TYPE_JIECANG,
@@ -668,6 +670,7 @@ BED_TYPE_DISPLAY_NAMES: dict[str, str] = {
     BED_TYPE_MALOUF_LEGACY_OKIN: "Malouf (FFE5 protocol)",
     BED_TYPE_MALOUF_NEW_OKIN: "Malouf (Nordic UART protocol)",
     BED_TYPE_MOTOSLEEP: "MotoSleep",
+    BED_TYPE_INTELLIBED: "Intellibed Sleep Genius",
     BED_TYPE_OCTO: "OCTO Smart Control",
     BED_TYPE_REVERIE: "Reverie (Protocol 108)",
     BED_TYPE_REVERIE_NIGHTSTAND: "Reverie Nightstand (Protocol 110)",
@@ -2365,6 +2368,14 @@ def _detect_bed_type_detailed(
         # MotoSleep and Power Bob use HHC names; the current MotoSleep app also
         # routes exact 28-character MOTO model names to its binary bed protocol.
         # AUDIO and MotoAMP are intentionally not bed controllers.
+        if is_intellibed_name(device_name):
+            signals.append("name:intellibed")
+            _LOGGER.info(
+                "Detected Intellibed Sleep Genius bed at %s (name: %s)",
+                service_info.address,
+                service_info.name,
+            )
+            return DetectionResult(bed_type=BED_TYPE_INTELLIBED, confidence=0.9, signals=signals)
         if _is_motosleep_local_name(device_name):
             signals.append("name:motosleep")
             _LOGGER.info(
@@ -2483,6 +2494,14 @@ def _detect_bed_type_detailed(
             return DetectionResult(bed_type=BED_TYPE_RICHMAT, confidence=0.8, signals=signals)
 
     # Check for MotoSleep - name-based HHC and MOTO bed-controller detection.
+    if is_intellibed_name(device_name):
+        signals.append("name:intellibed")
+        _LOGGER.info(
+            "Detected Intellibed Sleep Genius bed at %s (name: %s)",
+            service_info.address,
+            service_info.name,
+        )
+        return DetectionResult(bed_type=BED_TYPE_INTELLIBED, confidence=0.9, signals=signals)
     if _is_motosleep_local_name(device_name):
         signals.append("name:motosleep")
         _LOGGER.info(

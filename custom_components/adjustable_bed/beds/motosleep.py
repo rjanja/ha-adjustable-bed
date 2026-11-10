@@ -4,10 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
+
+from bleak.exc import BleakError
 
 from ..const import MOTOSLEEP_CHAR_UUID
-from .base import BedController, MotorCommandCallable, MotorControlSpec
+from .base import (
+    POSITION_UNIT_PERCENT,
+    BedController,
+    MotorCommandCallable,
+    MotorControlSpec,
+    PositionNumberSpec,
+    build_position_number_spec,
+)
 from .motosleep_profiles import (
     Command,
     MotoSleepProfile,
@@ -16,12 +26,40 @@ from .motosleep_profiles import (
 )
 
 if TYPE_CHECKING:
+    from bleak.backends.characteristic import BleakGATTCharacteristic
+
     from ..coordinator import AdjustableBedCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
 _FFE1 = "0000ffe1-0000-1000-8000-00805f9b34fb"
 _FFF1 = "0000fff1-0000-1000-8000-00805f9b34fb"
+
+# Intellibed status frames: "$" + 36 space-separated five-digit decimal fields,
+# ending CR, about five a second on FFE1.  Field indexes (zero-based):
+_STATUS_FIELD_COUNT = 36
+_STATUS_HEAD = 2  # head motor position count
+_STATUS_FEET = 3  # feet motor position count
+_STATUS_HEAD_MASSAGE = 6  # 0 / 40 / 80 / 120
+_STATUS_FOOT_MASSAGE = 7
+_STATUS_LIGHT_RGB = (8, 9, 10)  # 0..120 per channel
+_STATUS_CHANNEL_MAX = 120
+# Provisional full-travel counts.  Observed on one base: head up to 1655 during
+# zero-G, feet up to 232.  The scale also grows to the largest count seen, so a
+# full raise self-calibrates; percentages are clamped to 100.
+INTELLIBED_FULL_TRAVEL: dict[str, int] = {"back": 1700, "legs": 450}
+_STATUS_BUFFER_LIMIT = 512
+
+
+def parse_intellibed_status(line: str) -> list[int] | None:
+    """Return the 36 fields of one Intellibed status line, or None."""
+    line = line.strip()
+    if not line.startswith("$"):
+        return None
+    tokens = line[1:].split()
+    if len(tokens) != _STATUS_FIELD_COUNT or not all(t.isdigit() for t in tokens):
+        return None
+    return [int(token) for token in tokens]
 
 
 class MotoSleepCommands:
@@ -92,13 +130,22 @@ class MotoSleepController(BedController):
     """Profile-driven controller matching both shipped HHC applications."""
 
     def __init__(
-        self, coordinator: AdjustableBedCoordinator, device_name: str | None = None
+        self,
+        coordinator: AdjustableBedCoordinator,
+        device_name: str | None = None,
+        profile: MotoSleepProfile | None = None,
     ) -> None:
         super().__init__(coordinator)
         self._device_name = device_name or getattr(coordinator, "ble_device_name", None)
-        self.profile: MotoSleepProfile = resolve_motosleep_profile(self._device_name)
+        self.profile: MotoSleepProfile = profile or resolve_motosleep_profile(self._device_name)
         self._light_rgb = (255, 255, 255)
         self._massage_levels: dict[str, int] = {}
+        self._status_buffer = ""
+        self._status_notifying = False
+        self._status_counts: dict[str, int] = {}
+        self._status_max_seen: dict[str, int] = {}
+        self._status_positions: dict[str, float] = {}
+        self._status_published: dict[str, Any] = {}
         _LOGGER.info(
             "MotoSleep local name %r resolved to profile %s",
             self._device_name,
@@ -116,6 +163,34 @@ class MotoSleepController(BedController):
                         if str(characteristic.uuid).lower() == candidate:
                             return str(characteristic.uuid)
         return MOTOSLEEP_CHAR_UUID
+
+    @property
+    def supports_position_feedback(self) -> bool:
+        return self.profile.status_frames
+
+    @property
+    def reports_percentage_position(self) -> bool:
+        return self.profile.status_frames
+
+    @property
+    def position_number_specs(self) -> tuple[PositionNumberSpec, ...]:
+        if not self.profile.status_frames:
+            return super().position_number_specs
+        return (
+            build_position_number_spec("back", max_value=100, unit=POSITION_UNIT_PERCENT),
+            build_position_number_spec("legs", max_value=100, unit=POSITION_UNIT_PERCENT),
+        )
+
+    @property
+    def protocol_diagnostics(self) -> dict[str, Any]:
+        if not self.profile.status_frames:
+            return {}
+        return {
+            "profile": self.profile.profile_id,
+            "status_counts": dict(self._status_counts),
+            "status_max_seen": dict(self._status_max_seen),
+            "full_travel": {axis: self._full_travel(axis) for axis in INTELLIBED_FULL_TRAVEL},
+        }
 
     @property
     def auto_stops_on_idle(self) -> bool:
@@ -205,7 +280,8 @@ class MotoSleepController(BedController):
 
     @property
     def light_state_is_assumed(self) -> bool:
-        return self._has_explicit_light
+        # Status frames report the light channels, so the state is real.
+        return self._has_explicit_light and not self.profile.status_frames
 
     @property
     def supports_massage_intensity_control(self) -> bool:
@@ -353,6 +429,114 @@ class MotoSleepController(BedController):
             cancel_event=cancel_event,
             response=self.profile.write_with_response,
         )
+
+    # ----- Intellibed status frames -------------------------------------
+
+    def _full_travel(self, axis: str) -> int:
+        return max(INTELLIBED_FULL_TRAVEL[axis], self._status_max_seen.get(axis, 0))
+
+    async def start_notify(self, callback: Callable[[str, float], None] | None = None) -> None:
+        """Subscribe to FFE1 status frames on profiles that stream them."""
+        self._notify_callback = callback
+        if not self.profile.status_frames or self._status_notifying:
+            return
+        client = self.client
+        if client is None or not client.is_connected:
+            _LOGGER.debug("Cannot start Intellibed status notifications: not connected")
+            return
+        try:
+            async with self._ble_lock:
+                await client.start_notify(
+                    self.control_characteristic_uuid, self._handle_status_notification
+                )
+        except BleakError as err:
+            _LOGGER.debug("Could not start Intellibed status notifications: %s", err)
+            return
+        self._status_notifying = True
+        self._status_buffer = ""
+
+    async def stop_notify(self) -> None:
+        client = self.client
+        try:
+            if self._status_notifying and client is not None and client.is_connected:
+                async with self._ble_lock:
+                    await client.stop_notify(self.control_characteristic_uuid)
+        except BleakError:
+            _LOGGER.debug("Failed to stop Intellibed status notifications", exc_info=True)
+        finally:
+            self._status_notifying = False
+            self._status_buffer = ""
+            self._notify_callback = None
+
+    def on_disconnect(self) -> None:
+        self._status_notifying = False
+        self._status_buffer = ""
+        self._status_published = {}
+
+    def _handle_status_notification(
+        self, _characteristic: BleakGATTCharacteristic | Any, data: bytearray | bytes
+    ) -> None:
+        payload = bytes(data)
+        self.forward_raw_notification(self.control_characteristic_uuid, payload)
+        self.feed_status_bytes(payload)
+
+    def feed_status_bytes(self, payload: bytes) -> None:
+        """Reassemble CR/LF-terminated lines and apply each status frame."""
+        self._status_buffer += payload.decode("ascii", errors="ignore")
+        *lines, self._status_buffer = self._status_buffer.replace("\n", "\r").split("\r")
+        if len(self._status_buffer) > _STATUS_BUFFER_LIMIT:
+            self._status_buffer = ""
+        for line in lines:
+            fields = parse_intellibed_status(line)
+            if fields is not None:
+                self._apply_status(fields)
+
+    def _apply_status(self, fields: list[int]) -> None:
+        for axis, index in (("back", _STATUS_HEAD), ("legs", _STATUS_FEET)):
+            count = fields[index]
+            self._status_counts[axis] = count
+            if count > self._status_max_seen.get(axis, 0):
+                self._status_max_seen[axis] = count
+            percent = round(min(100.0, count / self._full_travel(axis) * 100), 1)
+            if self._status_positions.get(axis) != percent:
+                self._status_positions[axis] = percent
+                if self._notify_callback is not None:
+                    self._notify_callback(axis, percent)
+
+        step = self.profile.massage_level_step or 40
+        levels = {
+            "head": min(self.profile.massage_level_max, fields[_STATUS_HEAD_MASSAGE] // step),
+            "foot": min(self.profile.massage_level_max, fields[_STATUS_FOOT_MASSAGE] // step),
+        }
+        rgb_raw = tuple(fields[index] for index in _STATUS_LIGHT_RGB)
+        light_on = any(rgb_raw)
+        updates: dict[str, Any] = {}
+        if levels != self._massage_levels:
+            self._massage_levels = levels
+            updates["intellibed_massage"] = (levels["head"], levels["foot"])
+        if self._status_published.get("under_bed_lights_on") != light_on:
+            updates["under_bed_lights_on"] = light_on
+        if light_on:
+            rgb = tuple(
+                round(min(channel, _STATUS_CHANNEL_MAX) / _STATUS_CHANNEL_MAX * 255)
+                for channel in rgb_raw
+            )
+            if self._status_published.get("under_bed_lights_rgb") != rgb:
+                updates["under_bed_lights_rgb"] = rgb
+                self._light_rgb = cast(tuple[int, int, int], rgb)
+        if updates:
+            self._status_published.update(updates)
+            self.forward_controller_state_updates(updates)
+
+    def get_status_positions(self) -> dict[str, float]:
+        return dict(self._status_positions)
+
+    async def read_positions(self, motor_count: int = 2) -> None:  # noqa: ARG002
+        """Positions stream continuously; re-announce the latest values."""
+        if self._notify_callback is None:
+            return
+        for axis, percent in self._status_positions.items():
+            self._notify_callback(axis, percent)
 
     async def _send_action(
         self,

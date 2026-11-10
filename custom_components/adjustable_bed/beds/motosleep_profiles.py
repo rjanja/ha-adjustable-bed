@@ -57,6 +57,8 @@ class MotoSleepProfile:
     massage_level_max: int = 0
     # Frames sent per preset press before the release schedule.
     preset_repeat: int = 1
+    # Text status frames on FFE1 carry positions, light and massage state.
+    status_frames: bool = False
 
 
 def _frozen(mapping: Mapping[str, Command | MotorPair] | None = None) -> Mapping:
@@ -446,10 +448,15 @@ def _resolve_moto(name: str) -> MotoSleepProfile:
 # ``com.mobile.intellibed``) writes raw binary MOTO frames to FFE1 with a
 # response and ships its own command table, which differs from the MotoSleep
 # binary pages (flat, light and massage codes).
-_INTELLIBED_RE = re.compile(r"^HHC\d{5}BEDM\d$")
+_INTELLIBED_RE = re.compile(r"^HHC\d{5}BEDM\d$", re.IGNORECASE)
 
 
-def _intellibed_profile() -> MotoSleepProfile:
+def is_intellibed_name(device_name: str | None) -> bool:
+    """Return whether an advertised name is an Intellibed Sleep Genius base."""
+    return bool(device_name) and _INTELLIBED_RE.match(device_name or "") is not None
+
+
+def intellibed_profile() -> MotoSleepProfile:
     """Return the Intellibed Sleep Genius command table from its own app."""
     return MotoSleepProfile(
         profile_id="intellibed_sleep_genius",
@@ -487,6 +494,7 @@ def _intellibed_profile() -> MotoSleepProfile:
         # Hardware: a single zero-G/flat frame moves nothing; about 20 frames
         # 100 ms apart start the preset.
         preset_repeat=20,
+        status_frames=True,
     )
 
 
@@ -497,7 +505,7 @@ def resolve_motosleep_profile(device_name: str | None) -> MotoSleepProfile:
     if upper_name.startswith("MOTO"):
         return _resolve_moto(upper_name)
     if _INTELLIBED_RE.match(upper_name):
-        return _intellibed_profile()
+        return intellibed_profile()
     if "HHC" in upper_name and len(name) == 14:
         return _resolve_power_bob(upper_name)
     if "HHC" in upper_name and len(name) >= 14:

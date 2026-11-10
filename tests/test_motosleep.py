@@ -8,19 +8,27 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 
 from custom_components.adjustable_bed.beds.motosleep import (
+    INTELLIBED_FULL_TRAVEL,
     MotoSleepController,
     build_moto_binary_frame,
     build_motosleep_numeric_frame,
     build_motosleep_sync_frame,
     build_power_bob_numeric_frame,
+    parse_intellibed_status,
 )
 from custom_components.adjustable_bed.beds.motosleep_profiles import (
     MotoSleepTransport,
     resolve_motosleep_profile,
 )
-from custom_components.adjustable_bed.const import BED_TYPE_MOTOSLEEP, MOTOSLEEP_CHAR_UUID
+from custom_components.adjustable_bed.const import (
+    BED_TYPE_INTELLIBED,
+    BED_TYPE_MOTOSLEEP,
+    MOTOSLEEP_CHAR_UUID,
+    bed_type_has_position_feedback,
+)
 from custom_components.adjustable_bed.controller_factory import create_controller
 from custom_components.adjustable_bed.cover import _build_cover_description
+from custom_components.adjustable_bed.detection import detect_bed_type
 
 
 def _moto_name(page: str, *, feature: str = "Q", led: str = "D") -> str:
@@ -672,7 +680,10 @@ def test_intellibed_capabilities() -> None:
     assert controller.supports_explicit_light_on_control
     assert controller.supports_light_color_control
     assert not controller.supports_light_toggle_control
-    assert controller.light_state_is_assumed
+    # Status frames report the light channels, so its state is real.
+    assert not controller.light_state_is_assumed
+    assert controller.supports_position_feedback
+    assert controller.reports_percentage_position
     assert controller.supports_massage
     assert controller.supports_massage_off_control
     assert controller.supports_massage_intensity_control
@@ -809,3 +820,165 @@ async def test_intellibed_massage_steps_use_app_codes() -> None:
     assert [c.args[1] for c in client.write_gatt_char.await_args_list] == [
         build_moto_binary_frame(command) for command in (0x8102, 0x8104, 0x8103, 0x8105)
     ]
+
+
+# ----- Intellibed status frames ------------------------------------------------
+
+
+def _status_line(**fields: int) -> bytes:
+    """Build one bed status line: "$" + 36 five-digit fields, CR-terminated."""
+    values = [0] * 36
+    values[33] = 14951
+    for key, value in fields.items():
+        values[int(key.removeprefix("f"))] = value
+    return ("$" + " ".join(f"{v:05d}" for v in values) + "\r").encode()
+
+
+def _status_controller() -> tuple[MotoSleepController, MagicMock, list[tuple[str, float]]]:
+    controller, client = _controller(_INTELLIBED_NAME)
+    seen: list[tuple[str, float]] = []
+    controller._notify_callback = lambda axis, value: seen.append((axis, value))
+    return controller, client, seen
+
+
+def test_parse_intellibed_status_rejects_text_lines() -> None:
+    assert parse_intellibed_status(_status_line(f2=87).decode())[2] == 87
+    for line in ("STOP!", "RESET_RF!", "NO_HL!", "$00001 00002", ""):
+        assert parse_intellibed_status(line) is None
+
+
+def test_status_frames_split_across_notifications_report_percent_positions() -> None:
+    """Frames arrive in 16-byte chunks mixed with the bed's text lines."""
+    controller, _, seen = _status_controller()
+    stream = b"\r\nSTOP!\r\n" + _status_line(f2=850, f3=225) + b"RESET_RF!\r\n"
+
+    for start in range(0, len(stream), 16):
+        controller.feed_status_bytes(stream[start : start + 16])
+
+    full_back = INTELLIBED_FULL_TRAVEL["back"]
+    full_legs = INTELLIBED_FULL_TRAVEL["legs"]
+    assert seen == [
+        ("back", round(850 / full_back * 100, 1)),
+        ("legs", round(225 / full_legs * 100, 1)),
+    ]
+    assert controller.protocol_diagnostics["status_counts"] == {"back": 850, "legs": 225}
+
+
+def test_repeated_identical_frames_do_not_repeat_callbacks() -> None:
+    controller, _, seen = _status_controller()
+
+    for _ in range(5):
+        controller.feed_status_bytes(_status_line(f2=100, f3=0))
+
+    assert len(seen) == 2
+
+
+def test_counts_beyond_provisional_travel_recalibrate_to_100_percent() -> None:
+    controller, _, seen = _status_controller()
+    high = INTELLIBED_FULL_TRAVEL["back"] + 300
+
+    controller.feed_status_bytes(_status_line(f2=high))
+    controller.feed_status_bytes(_status_line(f2=high // 2))
+
+    back = [value for axis, value in seen if axis == "back"]
+    assert back == [100.0, round((high // 2) / high * 100, 1)]
+    assert controller.protocol_diagnostics["full_travel"]["back"] == high
+
+
+def test_status_frames_publish_light_and_massage_state_on_change() -> None:
+    controller, _, _ = _status_controller()
+    coordinator = controller._coordinator
+
+    controller.feed_status_bytes(_status_line(f6=40, f7=120, f8=120, f9=120, f10=120))
+    controller.feed_status_bytes(_status_line(f6=40, f7=120, f8=120, f9=120, f10=120))
+    controller.feed_status_bytes(_status_line())
+
+    updates = [c.args[0] for c in coordinator.handle_controller_state_updates.call_args_list]
+    assert updates == [
+        {
+            "intellibed_massage": (1, 3),
+            "under_bed_lights_on": True,
+            "under_bed_lights_rgb": (255, 255, 255),
+        },
+        {"intellibed_massage": (0, 0), "under_bed_lights_on": False},
+    ]
+    assert controller.get_massage_state() == {"head_intensity": 0, "foot_intensity": 0}
+
+
+async def test_start_notify_subscribes_to_ffe1_once() -> None:
+    controller, client = _controller(_INTELLIBED_NAME)
+    client.start_notify = AsyncMock()
+
+    await controller.start_notify(lambda axis, value: None)
+    await controller.start_notify(lambda axis, value: None)
+
+    client.start_notify.assert_awaited_once()
+    assert client.start_notify.await_args.args[0] == MOTOSLEEP_CHAR_UUID
+
+
+async def test_other_motosleep_profiles_do_not_subscribe() -> None:
+    controller, client = _controller(_hhc_name("G", c22="M"))
+    client.start_notify = AsyncMock()
+
+    await controller.start_notify(lambda axis, value: None)
+
+    client.start_notify.assert_not_awaited()
+    assert not controller.supports_position_feedback
+
+
+def test_intellibed_position_specs_are_percent_back_and_legs() -> None:
+    controller, _ = _controller(_INTELLIBED_NAME)
+
+    specs = controller.position_number_specs
+
+    assert [
+        (spec.position_key, spec.native_max_value, spec.native_unit_of_measurement)
+        for spec in specs
+    ] == [
+        ("back", 100, "%"),
+        ("legs", 100, "%"),
+    ]
+
+
+def test_intellibed_bed_type_has_position_feedback() -> None:
+    assert bed_type_has_position_feedback(BED_TYPE_INTELLIBED, None)
+    assert not bed_type_has_position_feedback(BED_TYPE_MOTOSLEEP, None)
+
+
+@pytest.mark.parametrize("name", ["HHC14951BEDM9", "HHC23235BEDM9"])
+def test_intellibed_names_detect_as_their_own_bed_type(name: str) -> None:
+    info = MagicMock()
+    info.name = name
+    info.device.name = name
+    info.address = "EC:C5:7F:3A:2B:A1"
+    info.service_uuids = ["0000180a-0000-1000-8000-00805f9b34fb"]
+    info.manufacturer_data = {}
+    info.rssi = -60
+
+    assert detect_bed_type(info) == BED_TYPE_INTELLIBED
+
+
+def test_other_hhc_names_still_detect_as_motosleep() -> None:
+    info = MagicMock()
+    info.name = "HHC0069815CDEF"
+    info.device.name = "HHC0069815CDEF"
+    info.address = "AA:BB:CC:DD:EE:FF"
+    info.service_uuids = []
+    info.manufacturer_data = {}
+    info.rssi = -60
+
+    assert detect_bed_type(info) == BED_TYPE_MOTOSLEEP
+
+
+async def test_factory_builds_intellibed_controller(hass) -> None:
+    coordinator = MagicMock(hass=hass)
+    controller = await create_controller(
+        coordinator,
+        BED_TYPE_INTELLIBED,
+        protocol_variant=None,
+        client=None,
+        device_name=None,
+    )
+
+    assert isinstance(controller, MotoSleepController)
+    assert controller.profile.profile_id == "intellibed_sleep_genius"
