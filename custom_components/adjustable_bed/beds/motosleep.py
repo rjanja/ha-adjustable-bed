@@ -13,6 +13,7 @@ from ..const import MOTOSLEEP_CHAR_UUID
 from .base import (
     POSITION_UNIT_PERCENT,
     BedController,
+    ControllerMotorHoldSpec,
     MotorCommandCallable,
     MotorControlSpec,
     PositionNumberSpec,
@@ -49,6 +50,16 @@ _STATUS_CHANNEL_MAX = 120
 # full raise self-calibrates; percentages are clamped to 100.
 INTELLIBED_FULL_TRAVEL: dict[str, int] = {"back": 1700, "legs": 450}
 _STATUS_BUFFER_LIMIT = 512
+# Held head/feet controls (the app's touch loop refreshes every 100 ms while
+# the button is down).  Control -> (motor key, upward).
+_INTELLIBED_HOLDS: dict[str, tuple[str, bool]] = {
+    "head_up": ("back", True),
+    "head_down": ("back", False),
+    "feet_up": ("legs", True),
+    "feet_down": ("legs", False),
+}
+_HOLD_REFRESH_MS = 100
+_HOLD_MAX_MS = 60000
 
 
 def parse_intellibed_status(line: str) -> list[int] | None:
@@ -388,9 +399,47 @@ class MotoSleepController(BedController):
                 close_fn=_close(key),
                 stop_fn=_stop,
                 max_angle=45 if key in {"legs", "feet", "tilt"} else 68,
+                hold=self._motor_hold_spec(key),
             )
             for key in self.profile.motors
         )
+
+    def _motor_hold_spec(self, key: str) -> ControllerMotorHoldSpec | None:
+        if not self.held_control_options:
+            return None
+        axis = {"back": "head", "legs": "feet"}.get(key)
+        if axis is None:
+            return None
+        return ControllerMotorHoldSpec(f"{axis}_up", f"{axis}_down")
+
+    @property
+    def held_control_options(self) -> tuple[str, ...]:
+        # Intellibed: one continuous refresh while a button is held, instead
+        # of finite pulses that each end in a release (which stutters).
+        return tuple(_INTELLIBED_HOLDS) if self.profile.status_frames else ()
+
+    def validate_hold_control(self, control: str, duration_ms: int) -> None:
+        if control not in self.held_control_options:
+            raise ValueError(f"Unsupported held control: {control}")
+        if type(duration_ms) is not int or not 0 < duration_ms <= _HOLD_MAX_MS:
+            raise ValueError(f"Duration must be an integer from 1 to {_HOLD_MAX_MS} ms")
+
+    async def hold_control(self, control: str, duration_ms: int) -> None:
+        """Refresh a head/feet frame every 100 ms until the duration or a stop."""
+        self.validate_hold_control(control, duration_ms)
+        key, upward = _INTELLIBED_HOLDS[control]
+        command = self.profile.motors[key][0 if upward else 1]
+        repeat_count = max(1, -(-duration_ms // _HOLD_REFRESH_MS))
+        try:
+            try:
+                async with asyncio.timeout(duration_ms / 1000):
+                    await self._send_action(
+                        command, repeat_count=repeat_count, repeat_delay_ms=_HOLD_REFRESH_MS
+                    )
+            except TimeoutError:
+                pass
+        finally:
+            await self._send_stop()
 
     def _build_command(self, char_code: int) -> bytes:
         """Build an ASCII action according to the resolved HHC transport."""

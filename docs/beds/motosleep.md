@@ -405,6 +405,11 @@ Normal MOTO movement release sends command/data `0x0000/0x0000` five times at
   on release and the bed prints `STOP!` and stops by itself about 0.9 s after
   the last frame. Home Assistant sends the `0x0000` release five times at
   100 ms, which the hardware accepts without motion, to stop promptly.
+- The Intellibed bed type declares head and feet as held controls
+  (`head_up`, `head_down`, `feet_up`, `feet_down`): holding a card button runs
+  one continuous 100 ms refresh (up to 60 s) and sends the release only when
+  the button is let go. Cover open/close and `hold_control` with a duration
+  refresh for that long, then release.
 - One preset frame moves nothing on hardware. Presets repeat their frame 20
   times (or the motor pulse count if larger) at 100 ms, then release.
 - Light, colour and massage frames are single writes. The app sends a colour's

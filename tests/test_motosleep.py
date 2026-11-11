@@ -982,3 +982,63 @@ async def test_factory_builds_intellibed_controller(hass) -> None:
 
     assert isinstance(controller, MotoSleepController)
     assert controller.profile.profile_id == "intellibed_sleep_genius"
+
+
+# ----- Intellibed held controls ----------------------------------------------
+
+
+def test_intellibed_motors_declare_continuous_holds() -> None:
+    controller, _ = _controller(_INTELLIBED_NAME)
+
+    holds = {spec.key: spec.hold for spec in controller.motor_control_specs}
+
+    assert controller.held_control_options == ("head_up", "head_down", "feet_up", "feet_down")
+    assert (holds["back"].up_control, holds["back"].down_control) == ("head_up", "head_down")
+    assert (holds["legs"].up_control, holds["legs"].down_control) == ("feet_up", "feet_down")
+
+
+def test_other_motosleep_profiles_keep_finite_pulses() -> None:
+    controller, _ = _controller(_hhc_name("G", c22="M"))
+
+    assert controller.held_control_options == ()
+    assert all(spec.hold is None for spec in controller.motor_control_specs)
+
+
+async def test_intellibed_hold_refreshes_until_duration_then_releases() -> None:
+    controller, _ = _controller(_INTELLIBED_NAME)
+
+    with patch.object(controller, "_write_gatt_with_retry", AsyncMock()) as write:
+        await controller.hold_control("feet_up", 1000)
+
+    move, release = write.await_args_list
+    assert move.args[1] == build_moto_binary_frame(0x0008)
+    assert move.kwargs["repeat_count"] == 10
+    assert move.kwargs["repeat_delay_ms"] == 100
+    assert release.args[1] == build_moto_binary_frame(0x0000)
+    assert release.kwargs["repeat_count"] == 5
+
+
+async def test_intellibed_hold_stops_at_deadline_and_still_releases() -> None:
+    """A slow link cannot stretch a hold past its duration."""
+    controller, _ = _controller(_INTELLIBED_NAME)
+    frames: list[bytes] = []
+
+    async def slow_write(_uuid, frame, **kwargs):
+        frames.append(frame)
+        if frame == build_moto_binary_frame(0x0002):
+            await asyncio.sleep(10)
+
+    with patch.object(controller, "_write_gatt_with_retry", side_effect=slow_write):
+        await controller.hold_control("head_up", 50)
+
+    assert frames == [build_moto_binary_frame(0x0002), build_moto_binary_frame(0x0000)]
+
+
+@pytest.mark.parametrize(
+    ("control", "duration"), [("lights", 1000), ("head_up", 0), ("head_up", 60001)]
+)
+def test_intellibed_hold_rejects_bad_requests(control: str, duration: int) -> None:
+    controller, _ = _controller(_INTELLIBED_NAME)
+
+    with pytest.raises(ValueError):
+        controller.validate_hold_control(control, duration)
