@@ -433,6 +433,11 @@ class MotoSleepController(BedController):
         key, upward = _INTELLIBED_HOLDS[control]
         command = self.profile.motors[key][0 if upward else 1]
         repeat_count = max(1, -(-duration_ms // _HOLD_REFRESH_MS))
+        # The status stream (~5 text frames a second, sent as many small
+        # notifications) crowds the proxy link so refresh frames arrive late
+        # and the base stops itself.  Pause it for the hold and resume after
+        # the release, so positions catch up once the motor stops.
+        paused = await self._pause_status_stream()
         try:
             try:
                 async with asyncio.timeout(duration_ms / 1000):
@@ -442,7 +447,11 @@ class MotoSleepController(BedController):
             except TimeoutError:
                 pass
         finally:
-            await self._send_stop()
+            try:
+                await self._send_stop()
+            finally:
+                if paused:
+                    await self._resume_status_stream()
 
     def _build_command(self, char_code: int) -> bytes:
         """Build an ASCII action according to the resolved HHC transport."""
@@ -519,6 +528,29 @@ class MotoSleepController(BedController):
             self._status_notifying = False
             self._status_buffer = ""
             self._notify_callback = None
+
+    async def _pause_status_stream(self) -> bool:
+        """Unsubscribe from status frames, keeping the position callback."""
+        client = self.client
+        if not self._status_notifying or client is None or not client.is_connected:
+            return False
+        try:
+            async with self._ble_lock:
+                await client.stop_notify(self.control_characteristic_uuid)
+        except BleakError as err:
+            _LOGGER.debug("Could not pause Intellibed status notifications: %s", err)
+            return False
+        self._status_notifying = False
+        self._status_buffer = ""
+        _LOGGER.debug("Paused Intellibed status notifications for a held move")
+        return True
+
+    async def _resume_status_stream(self) -> None:
+        if self._notify_callback is None:
+            return
+        await self.start_notify(self._notify_callback)
+        if self._status_notifying:
+            _LOGGER.debug("Resumed Intellibed status notifications")
 
     def on_disconnect(self) -> None:
         self._status_notifying = False

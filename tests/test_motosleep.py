@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+from bleak.exc import BleakError
 
 from custom_components.adjustable_bed.beds.motosleep import (
     INTELLIBED_FULL_TRAVEL,
@@ -1099,3 +1100,62 @@ async def test_non_intellibed_moves_keep_acknowledged_writes() -> None:
         c.kwargs["response"] is controller.profile.write_with_response
         for c in client.write_gatt_char.await_args_list
     )
+
+
+async def test_intellibed_hold_pauses_status_stream_and_resumes_after_release() -> None:
+    """The status stream crowds the proxy link; holds run with it paused."""
+    controller, client = _controller(_INTELLIBED_NAME)
+    order: list[str] = []
+    client.start_notify = AsyncMock(side_effect=lambda *_a, **_k: order.append("subscribe"))
+    client.stop_notify = AsyncMock(side_effect=lambda *_a, **_k: order.append("unsubscribe"))
+    callback = MagicMock()
+    await controller.start_notify(callback)
+    order.clear()
+
+    async def write(_uuid, frame, **_kwargs):
+        order.append(frame.hex())
+
+    with patch.object(controller, "_write_gatt_with_retry", side_effect=write):
+        await controller.hold_control("head_up", 300)
+
+    assert order == [
+        "unsubscribe",
+        build_moto_binary_frame(0x0002).hex(),
+        build_moto_binary_frame(0x0000).hex(),
+        "subscribe",
+    ]
+    assert controller._notify_callback is callback
+    assert controller._status_notifying
+
+
+async def test_intellibed_hold_without_status_stream_does_not_subscribe() -> None:
+    """With angle sensing disabled there is nothing to pause or resume."""
+    controller, client = _controller(_INTELLIBED_NAME)
+    client.start_notify = AsyncMock()
+    client.stop_notify = AsyncMock()
+
+    with patch.object(controller, "_write_gatt_with_retry", AsyncMock()):
+        await controller.hold_control("head_up", 300)
+
+    client.start_notify.assert_not_awaited()
+    client.stop_notify.assert_not_awaited()
+
+
+async def test_intellibed_hold_resumes_stream_even_if_release_fails() -> None:
+    controller, client = _controller(_INTELLIBED_NAME)
+    client.start_notify = AsyncMock()
+    client.stop_notify = AsyncMock()
+    await controller.start_notify(MagicMock())
+    client.start_notify.reset_mock()
+
+    async def write(_uuid, frame, **_kwargs):
+        if frame == build_moto_binary_frame(0x0000):
+            raise BleakError("gone")
+
+    with (
+        patch.object(controller, "_write_gatt_with_retry", side_effect=write),
+        pytest.raises(BleakError),
+    ):
+        await controller.hold_control("head_up", 300)
+
+    client.start_notify.assert_awaited_once()
