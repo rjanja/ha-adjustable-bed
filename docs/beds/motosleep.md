@@ -408,7 +408,11 @@ Normal MOTO movement release sends command/data `0x0000/0x0000` five times at
 - The Intellibed bed type declares head and feet as held controls
   (`head_up`, `head_down`, `feet_up`, `feet_down`): holding a card button runs
   one continuous 100 ms refresh (up to 60 s) and sends the release only when
-  the button is let go. Cover open/close and `hold_control` with a duration
+  the button is let go. Refresh frames (held motors and presets) are written
+  without waiting for the acknowledgement and paced by the wall clock, so a
+  slow acknowledgement through a Bluetooth proxy cannot open a gap past the
+  base's 0.9 s timeout; one-off frames and the release still wait for it.
+  Debug logging shows each refresh frame's timing and the base's `STOP!` lines. Cover open/close and `hold_control` with a duration
   refresh for that long, then release.
 - One preset frame moves nothing on hardware. Presets repeat their frame 20
   times (or the motor pulse count if larger) at 100 ms, then release.

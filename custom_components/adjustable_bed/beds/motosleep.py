@@ -60,6 +60,9 @@ _INTELLIBED_HOLDS: dict[str, tuple[str, bool]] = {
 }
 _HOLD_REFRESH_MS = 100
 _HOLD_MAX_MS = 60000
+# The base stops by itself about 0.9 s after the last movement frame; log any
+# refresh gap that gets close to that.
+_REFRESH_GAP_WARN_S = 0.6
 
 
 def parse_intellibed_status(line: str) -> list[int] | None:
@@ -433,7 +436,7 @@ class MotoSleepController(BedController):
         try:
             try:
                 async with asyncio.timeout(duration_ms / 1000):
-                    await self._send_action(
+                    await self._send_refresh(
                         command, repeat_count=repeat_count, repeat_delay_ms=_HOLD_REFRESH_MS
                     )
             except TimeoutError:
@@ -539,6 +542,8 @@ class MotoSleepController(BedController):
             fields = parse_intellibed_status(line)
             if fields is not None:
                 self._apply_status(fields)
+            elif line.strip() == "STOP!":
+                _LOGGER.debug("Intellibed base reported STOP! (its own movement timeout)")
 
     def _apply_status(self, fields: list[int]) -> None:
         for axis, index in (("back", _STATUS_HEAD), ("legs", _STATUS_FEET)):
@@ -603,6 +608,58 @@ class MotoSleepController(BedController):
             cancel_event=cancel_event,
         )
 
+    async def _send_refresh(
+        self,
+        action: Command,
+        *,
+        repeat_count: int,
+        repeat_delay_ms: int,
+        data: int = 0,
+    ) -> None:
+        """Send a repeated movement frame (held motor or preset refresh)."""
+        if not self.profile.paced_refresh:
+            await self._send_action(
+                action, data=data, repeat_count=repeat_count, repeat_delay_ms=repeat_delay_ms
+            )
+            return
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        last = started
+        sent = 0
+
+        def _on_write() -> None:
+            nonlocal last, sent
+            now = loop.time()
+            gap = now - last
+            sent += 1
+            if sent > 1 and gap >= _REFRESH_GAP_WARN_S:
+                _LOGGER.debug(
+                    "Refresh frame %d of %d sent %.0f ms after the previous one "
+                    "(base stops ~900 ms after the last frame)",
+                    sent,
+                    repeat_count,
+                    gap * 1000,
+                )
+            elif _LOGGER.isEnabledFor(logging.DEBUG):
+                _LOGGER.debug(
+                    "Refresh frame %d of %d at +%.0f ms (gap %.0f ms)",
+                    sent,
+                    repeat_count,
+                    (now - started) * 1000,
+                    gap * 1000,
+                )
+            last = now
+
+        await self._write_gatt_with_retry(
+            self.control_characteristic_uuid,
+            self._encode_action(action, data),
+            repeat_count=repeat_count,
+            repeat_delay_ms=repeat_delay_ms,
+            response=False,
+            wall_clock_pacing=True,
+            on_write=_on_write,
+        )
+
     async def _send_stop(self) -> None:
         stop = self.profile.stop
         if stop is None:
@@ -628,7 +685,7 @@ class MotoSleepController(BedController):
                 # Power Bob's repeating ImageButton has no immediate write;
                 # its first movement pulse fires after one 100 ms interval.
                 await asyncio.sleep(0.1)
-            await self._send_action(
+            await self._send_refresh(
                 pair[0 if upward else 1],
                 repeat_count=self._coordinator.motor_pulse_count,
                 repeat_delay_ms=100,
@@ -710,7 +767,7 @@ class MotoSleepController(BedController):
             await self._send_action(action)
             return
         try:
-            await self._send_action(
+            await self._send_refresh(
                 action,
                 repeat_count=max(self.profile.preset_repeat, self._coordinator.motor_pulse_count),
                 repeat_delay_ms=100,

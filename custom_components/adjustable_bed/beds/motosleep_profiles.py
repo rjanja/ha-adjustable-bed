@@ -59,6 +59,11 @@ class MotoSleepProfile:
     preset_repeat: int = 1
     # Text status frames on FFE1 carry positions, light and massage state.
     status_frames: bool = False
+    # Repeated movement refresh frames are sent without waiting for the GATT
+    # acknowledgement and paced by the wall clock, so a slow acknowledgement
+    # (e.g. through a Bluetooth proxy) cannot stretch the gap past the base's
+    # own stop timeout.
+    paced_refresh: bool = False
 
 
 def _frozen(mapping: Mapping[str, Command | MotorPair] | None = None) -> Mapping:
@@ -495,6 +500,7 @@ def intellibed_profile() -> MotoSleepProfile:
         # 100 ms apart start the preset.
         preset_repeat=20,
         status_frames=True,
+        paced_refresh=True,
     )
 
 

@@ -701,7 +701,9 @@ async def test_intellibed_head_move_repeats_then_releases() -> None:
     calls = client.write_gatt_char.await_args_list
     assert calls[0].args[1] == build_moto_binary_frame(0x0002)
     assert [c.args[1] for c in calls[1:]] == [build_moto_binary_frame(0x0000)] * 5
-    assert all(c.kwargs["response"] is True for c in calls)
+    # Refresh frames do not wait for the acknowledgement; the release does.
+    assert calls[0].kwargs["response"] is False
+    assert all(c.kwargs["response"] is True for c in calls[1:])
 
 
 async def test_intellibed_feet_down_uses_standard_leg_code() -> None:
@@ -1042,3 +1044,58 @@ def test_intellibed_hold_rejects_bad_requests(control: str, duration: int) -> No
 
     with pytest.raises(ValueError):
         controller.validate_hold_control(control, duration)
+
+
+async def test_intellibed_hold_refresh_is_wall_clock_paced_without_response() -> None:
+    """A slow GATT acknowledgement must not stretch the refresh interval."""
+    controller, _ = _controller(_INTELLIBED_NAME)
+
+    with patch.object(controller, "_write_gatt_with_retry", AsyncMock()) as write:
+        await controller.hold_control("head_up", 4000)
+
+    move = write.await_args_list[0]
+    assert move.args[1] == build_moto_binary_frame(0x0002)
+    assert move.kwargs["repeat_count"] == 40
+    assert move.kwargs["repeat_delay_ms"] == 100
+    assert move.kwargs["response"] is False
+    assert move.kwargs["wall_clock_pacing"] is True
+    assert callable(move.kwargs["on_write"])
+
+
+async def test_intellibed_refresh_logs_slow_gaps(caplog: pytest.LogCaptureFixture) -> None:
+    controller, _ = _controller(_INTELLIBED_NAME)
+    times = iter([0.0, 0.0, 0.1, 0.9])
+
+    async def fake_write(*_args, on_write, repeat_count, **_kwargs):
+        for _ in range(repeat_count):
+            on_write()
+
+    loop = asyncio.get_running_loop()
+    with (
+        patch.object(controller, "_write_gatt_with_retry", side_effect=fake_write),
+        patch.object(loop, "time", side_effect=lambda: next(times)),
+        caplog.at_level("DEBUG", logger="custom_components.adjustable_bed.beds.motosleep"),
+    ):
+        await controller._send_refresh(0x0002, repeat_count=3, repeat_delay_ms=100)
+
+    assert "Refresh frame 3 of 3 sent 800 ms after the previous one" in caplog.text
+
+
+def test_intellibed_stop_lines_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    controller, _ = _controller(_INTELLIBED_NAME)
+
+    with caplog.at_level("DEBUG", logger="custom_components.adjustable_bed.beds.motosleep"):
+        controller.feed_status_bytes(b"\r\nSTOP!\r\n")
+
+    assert "reported STOP!" in caplog.text
+
+
+async def test_non_intellibed_moves_keep_acknowledged_writes() -> None:
+    controller, client = _controller(_hhc_name("G", c22="M"))
+
+    await controller.move_head_up()
+
+    assert all(
+        c.kwargs["response"] is controller.profile.write_with_response
+        for c in client.write_gatt_char.await_args_list
+    )
