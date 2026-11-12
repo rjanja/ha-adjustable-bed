@@ -254,6 +254,7 @@ from .detection import (
     refine_qrrm_protocol_from_device_info,
 )
 from .diagnostic_payloads import new_connection_attempt_details
+from .errors import BedNotConnectedError
 from .furnimove_repair import CONF_OKIMAT_MODEL_ON_CST, async_refresh_furnimove_layout_issues
 from .pairing import (
     filter_child_options,
@@ -431,6 +432,7 @@ class AdjustableBedCoordinator:
             CONF_PROTOCOL_VARIANT, DEFAULT_PROTOCOL_VARIANT
         )
         self._name: str = entry.data.get(CONF_NAME, "Adjustable Bed")
+        self._last_unreachable_reason: str | None = None
         # Malouf's APK has one command exception keyed to Smartbed238. Keep the
         # configured name as a controller fallback, but track actual observations
         # separately so protocol detection never relies on a user-facing rename.
@@ -4936,6 +4938,7 @@ class AdjustableBedCoordinator:
                 6, source_mac=self._address
             )
         reason = connection_reachability(self.hass, self._address)
+        self._last_unreachable_reason = reason
         if reason:
             _LOGGER.warning("Bluetooth reachability for %s: %s", self._address, reason)
             if self._connection_attempt_details:
@@ -6028,7 +6031,7 @@ class AdjustableBedCoordinator:
                 )
                 if not await self.async_ensure_connected(reset_timer=False):
                     _LOGGER.error("Cannot write command: not connected to bed")
-                    raise ConnectionError("Not connected to bed")
+                    raise BedNotConnectedError(self._not_connected_message())
 
                 if self._controller is None:
                     _LOGGER.error("Cannot write command: no controller available")
@@ -6162,7 +6165,7 @@ class AdjustableBedCoordinator:
                 else:
                     if not await self.async_ensure_connected(reset_timer=False):
                         _LOGGER.error("Cannot send stop: not connected to bed")
-                        raise ConnectionError("Not connected to bed")
+                        raise BedNotConnectedError(self._not_connected_message())
 
                     # Connecting can rebuild the controller from the selected
                     # path. STOP must use that live instance, not the offline
@@ -6209,6 +6212,16 @@ class AdjustableBedCoordinator:
                         # Otherwise, reset the idle disconnect timer
                         self._reset_disconnect_timer()
 
+    def _not_connected_message(self) -> str:
+        """Readable reason a command could not reach the bed."""
+        reason = getattr(self, "_last_unreachable_reason", None)
+        detail = f": Bluetooth reports {reason}" if reason else ""
+        return (
+            f"Not connected to bed {self._name} ({self._address}){detail}. "
+            "It may be connected to another device (such as its phone app), "
+            "powered off or out of range."
+        )
+
     async def _async_prepare_controller_operation(self, operation_name: str) -> BedController:
         """Prepare the selected transport before any controller operation."""
         if getattr(self, "_pairing_transfer_active", False) is True:
@@ -6225,7 +6238,7 @@ class AdjustableBedCoordinator:
 
         if not await self.async_ensure_connected(reset_timer=False):
             _LOGGER.error("Cannot execute %s: not connected to bed", operation_name)
-            raise ConnectionError("Not connected to bed")
+            raise BedNotConnectedError(self._not_connected_message())
 
         # async_ensure_connected may resolve a different usable path and
         # replace the offline controller. Return only the controller bound to

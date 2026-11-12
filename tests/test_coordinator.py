@@ -7772,3 +7772,44 @@ class TestUnverifiedBondMarkerScope:
 
         assert CONF_BLE_BOND_ATTEMPTED_SOURCE not in coordinator.entry.data
         assert CONF_BLE_BOND_CONTEXT in coordinator.entry.data
+
+
+
+class TestBedNotConnectedError:
+    """Unreachable beds surface a readable Home Assistant error."""
+
+    async def test_unreachable_command_raises_readable_error(
+        self, hass: HomeAssistant, mock_config_entry, mock_coordinator_connected
+    ):
+        from homeassistant.exceptions import HomeAssistantError
+
+        from custom_components.adjustable_bed.errors import BedNotConnectedError
+
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._last_unreachable_reason = "unknown (never seen by any scanner)"
+
+        with (
+            patch.object(
+                coordinator, "async_ensure_connected", new=AsyncMock(return_value=False)
+            ),
+            pytest.raises(BedNotConnectedError) as err,
+        ):
+            await coordinator._async_prepare_controller_operation("preset_zero_g")
+
+        assert isinstance(err.value, ConnectionError)
+        assert isinstance(err.value, HomeAssistantError)
+        message = str(err.value)
+        assert message.startswith("Not connected to bed ")
+        assert coordinator.address in message
+        assert "never seen by any scanner" in message
+        assert "phone app" in message
+
+    async def test_message_without_reachability_reason(
+        self, hass: HomeAssistant, mock_config_entry, mock_coordinator_connected
+    ):
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+
+        message = coordinator._not_connected_message()
+
+        assert "Bluetooth reports" not in message
+        assert coordinator.address in message
